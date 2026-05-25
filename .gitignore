@@ -1,0 +1,38 @@
+# Секреты и персональные данные
+.env
+bot_state.json
+
+# База данных (содержит пользовательские данные)
+*.db
+*.db-shm
+*.db-wal
+
+# Логи
+logs/*
+!logs/.gitkeep
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+dist/
+build/
+
+# Виртуальное окружение
+.venv/
+venv/
+env/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Claude Code (внутренние файлы агента)
+.claude/
+
+# Внутренняя документация разработчика
+PROJECT.md

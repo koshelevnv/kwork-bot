@@ -1,0 +1,12 @@
+# Автоматическая нормализация строк
+* text=auto
+
+# Shell-скрипты — только LF (иначе не запустятся на Linux)
+*.sh text eol=lf
+
+# Python-файлы — LF
+*.py text eol=lf
+
+# Конфиги — LF
+.env.example text eol=lf
+requirements.txt text eol=lf

@@ -8,7 +8,7 @@
 
 ### Linux VPS (рекомендуется)
 
-> Недорогой и стабильный VPS от 119 рублей в месяц — [play2go.cloud](https://play2go.cloud/?ref_id=TAiMBIAReXI)
+> Быстрый и стабильный VPS от 239 рублей в месяц — [aeza.ru](https://aeza.ru/?ref=493681)
 
 **1. Создай бота и получи токен**
 

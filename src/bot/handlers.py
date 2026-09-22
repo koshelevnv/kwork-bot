@@ -14,7 +14,8 @@ from src.config import Settings
 from src.topics import pack_title
 from src.constants import KWORK_CATEGORIES, TIMEZONES, CATEGORY_NAME_BY_ID
 from src.database import (
-    upsert_user, get_user, get_user_categories, add_user_category,
+    upsert_user, get_user, get_user_categories, get_user_excluded_categories,
+    add_user_category,
     remove_user_category, get_user_keywords, add_user_keyword,
     remove_user_keyword, get_user_minus_words, get_user_packs,
     toggle_user_pack, update_poll_interval, update_time_window,
@@ -27,7 +28,14 @@ router = Router()
 
 NO_CATEGORIES_HINT = (
     "🌐 <b>Категории не выбраны — присылаю заказы из всех разделов.</b>\n"
-    "Чтобы сузить: «🎛 Фильтры» → «➕ Добавить категорию»."
+    "Чтобы сузить: «🎛 Фильтры» → «➕ Добавить категорию».\n"
+    "Убрать пару лишних разделов: «🚫 Исключить категорию»."
+)
+
+EXCLUDE_HINT = (
+    "🚫 <b>Исключить категорию</b>\n\n"
+    "Заказы из отмеченных разделов приходить не будут — удобно, когда нужна "
+    "почти вся лента, кроме пары тем.\n\nВыбери группу 👇"
 )
 
 
@@ -35,6 +43,7 @@ class Form(StatesGroup):
     add_keyword    = State()
     add_minus_word = State()
     manual_cat     = State()
+    manual_excl    = State()
     set_hour_to    = State()  # от-час выбран, ждём до-час
     set_price_from = State()
     set_price_to   = State()
@@ -133,11 +142,19 @@ async def btn_status(message: Message, settings: Settings) -> None:
     uid  = message.from_user.id
     user = await get_user(uid)
     cats  = await get_user_categories(uid)
+    excl  = await get_user_excluded_categories(uid)
     kws   = await get_user_keywords(uid)
     packs = await get_user_packs(uid)
     minus = await get_user_minus_words(uid)
 
     cat_lines  = "\n".join(f"  • {c['category_name']}" for c in cats) or "  все разделы (фильтр не задан)"
+    excl_block = (
+        "\n\n<b>Исключены ({n}):</b>\n{lines}".format(
+            n=len(excl),
+            lines="\n".join(f"  🚫 {c['category_name']}" for c in excl),
+        )
+        if excl else ""
+    )
     pack_lines = ", ".join(pack_title(p) for p in packs)
     kw_lines   = ", ".join(kws)
 
@@ -179,7 +196,9 @@ async def btn_status(message: Message, settings: Settings) -> None:
         f"📅 Дни недели: {days_label}\n"
         f"🌍 Часовой пояс: UTC{sign}{utc_offset}\n"
         f"💰 Цена: {price_label}\n\n"
-        f"<b>Категории ({len(cats)}):</b>\n{cat_lines}\n\n"
+        f"<b>Категории ({len(cats)}):</b>\n{cat_lines}"
+        + excl_block
+        + "\n\n"
         + "\n".join(word_lines)
         + ("" if cats else f"\n\n{NO_CATEGORIES_HINT}"),
         parse_mode="HTML",
@@ -203,13 +222,17 @@ async def cb_my_cats(call: CallbackQuery, settings: Settings) -> None:
 
 async def _show_my_cats(msg: Message, user_id: int, edit: bool = False) -> None:
     cats = await get_user_categories(user_id)
-    text = (
-        f"📋 <b>Ваши категории</b> ({len(cats)})\n\nНажми ❌ чтобы удалить 👇"
-        if cats else
-        "📋 Категории не выбраны — приходят заказы из <b>всех разделов</b>.\n\n"
-        "Нажми <b>Добавить категорию</b>, чтобы оставить только нужные 👇"
-    )
-    kb = my_categories_kb(cats)
+    excl = await get_user_excluded_categories(user_id)
+    if cats:
+        text = f"📋 <b>Ваши категории</b> ({len(cats)})\n\nНажми ❌ чтобы удалить 👇"
+    else:
+        text = (
+            "📋 Категории не выбраны — приходят заказы из <b>всех разделов</b>.\n\n"
+            "Нажми <b>Добавить категорию</b>, чтобы оставить только нужные 👇"
+        )
+    if excl:
+        text += f"\n\n🚫 Исключено разделов: <b>{len(excl)}</b>"
+    kb = my_categories_kb(cats, excl)
     if edit:
         await msg.edit_text(text, parse_mode="HTML", reply_markup=kb)
     else:
@@ -220,8 +243,15 @@ async def _show_my_cats(msg: Message, user_id: int, edit: bool = False) -> None:
 async def cb_del_cat(call: CallbackQuery, settings: Settings) -> None:
     await _reg(call, settings)
     cat_id = call.data.split(":")[1]
+    was_excluded = any(
+        c["category_id"] == cat_id
+        for c in await get_user_excluded_categories(call.from_user.id)
+    )
     removed = await remove_user_category(call.from_user.id, cat_id)
-    await call.answer("❌ Категория удалена" if removed else "Не найдена")
+    if not removed:
+        await call.answer("Не найдена")
+    else:
+        await call.answer("↩️ Исключение снято" if was_excluded else "❌ Категория удалена")
     await _show_my_cats(call.message, call.from_user.id, edit=True)
 
 
@@ -317,6 +347,104 @@ async def process_manual_cat(message: Message, state: FSMContext, settings: Sett
         )
     else:
         await message.answer("Эта категория уже отслеживается.", reply_markup=main_reply_kb())
+
+
+# ── Исключить категорию ────────────────────────────────────────────────────
+
+@router.message(F.text == "🚫 Исключить категорию")
+async def btn_excl_cat(message: Message, settings: Settings) -> None:
+    await _reg(message, settings)
+    await message.answer(
+        EXCLUDE_HINT, parse_mode="HTML", reply_markup=category_groups_kb(mode="excl")
+    )
+
+
+@router.callback_query(F.data == "browse_excl")
+async def cb_browse_excl(call: CallbackQuery, settings: Settings) -> None:
+    await _reg(call, settings)
+    await call.answer()
+    await call.message.edit_text(
+        EXCLUDE_HINT, parse_mode="HTML", reply_markup=category_groups_kb(mode="excl")
+    )
+
+
+@router.callback_query(F.data.startswith("xgroup:"))
+async def cb_excl_group(call: CallbackQuery, settings: Settings) -> None:
+    await _reg(call, settings)
+    group = call.data[len("xgroup:"):]
+    if group not in KWORK_CATEGORIES:
+        await call.answer("Группа не найдена")
+        return
+    excl_ids = {c["category_id"] for c in await get_user_excluded_categories(call.from_user.id)}
+    await call.answer()
+    await call.message.edit_text(
+        f"<b>{group}</b>\nОтметь ненужные разделы — повторный клик снимает 🚫",
+        parse_mode="HTML",
+        reply_markup=category_list_kb(group, excl_ids, mode="excl"),
+    )
+
+
+async def _refresh_excl_group(call: CallbackQuery, cat_id: str) -> None:
+    group = next(
+        (g for g, cats in KWORK_CATEGORIES.items() if any(c[0] == cat_id for c in cats)), None
+    )
+    if not group:
+        return
+    excl_ids = {c["category_id"] for c in await get_user_excluded_categories(call.from_user.id)}
+    await call.message.edit_reply_markup(
+        reply_markup=category_list_kb(group, excl_ids, mode="excl")
+    )
+
+
+@router.callback_query(F.data.startswith("add_excl:"))
+async def cb_add_excl(call: CallbackQuery, settings: Settings) -> None:
+    await _reg(call, settings)
+    cat_id   = call.data[len("add_excl:"):]
+    cat_name = CATEGORY_NAME_BY_ID.get(cat_id, cat_id)
+    added    = await add_user_category(call.from_user.id, cat_id, cat_name, excluded=True)
+    await call.answer(f"🚫 Исключена: {cat_name}" if added else "Уже исключена")
+    await _refresh_excl_group(call, cat_id)
+
+
+@router.callback_query(F.data.startswith("rm_excl:"))
+async def cb_rm_excl(call: CallbackQuery, settings: Settings) -> None:
+    await _reg(call, settings)
+    cat_id  = call.data[len("rm_excl:"):]
+    removed = await remove_user_category(call.from_user.id, cat_id)
+    await call.answer("↩️ Исключение снято" if removed else "Не найдена")
+    await _refresh_excl_group(call, cat_id)
+
+
+@router.callback_query(F.data == "xcat_manual")
+async def cb_excl_manual(call: CallbackQuery, state: FSMContext, settings: Settings) -> None:
+    await _reg(call, settings)
+    await state.set_state(Form.manual_excl)
+    await call.answer()
+    await call.message.answer(
+        "Введи ID категории, которую надо исключить.\n\n"
+        "Найди его в URL: kwork.ru/projects?<b>c=41</b>",
+        parse_mode="HTML",
+        reply_markup=cancel_kb(),
+    )
+
+
+@router.message(Form.manual_excl)
+async def process_manual_excl(message: Message, state: FSMContext, settings: Settings) -> None:
+    await _reg(message, settings)
+    text = (message.text or "").strip()
+    if not text.isdigit():
+        await message.answer("Нужно ввести только цифры. Попробуй ещё раз.", reply_markup=cancel_kb())
+        return
+    cat_name = CATEGORY_NAME_BY_ID.get(text, f"Категория {text}")
+    added = await add_user_category(message.from_user.id, text, cat_name, excluded=True)
+    await state.clear()
+    if added:
+        await message.answer(
+            f"🚫 Исключена: <b>{cat_name}</b> (#{text})",
+            parse_mode="HTML", reply_markup=main_reply_kb(),
+        )
+    else:
+        await message.answer("Эта категория уже исключена.", reply_markup=main_reply_kb())
 
 
 # ── Ключевые слова ─────────────────────────────────────────────────────────

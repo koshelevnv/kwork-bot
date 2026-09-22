@@ -30,6 +30,7 @@ async def init_db(poll_interval: int = 30) -> None:
                 user_id       INTEGER NOT NULL,
                 category_id   TEXT    NOT NULL,
                 category_name TEXT    NOT NULL,
+                is_excluded   INTEGER NOT NULL DEFAULT 0,
                 PRIMARY KEY (user_id, category_id),
                 FOREIGN KEY (user_id) REFERENCES users(user_id)
             );
@@ -57,6 +58,7 @@ async def init_db(poll_interval: int = 30) -> None:
                 budget        TEXT    NOT NULL DEFAULT '',
                 price_min     INTEGER NOT NULL DEFAULT 0,
                 category_name TEXT    NOT NULL DEFAULT '',
+                own_category_id TEXT  NOT NULL DEFAULT '',
                 published_at  TEXT    NOT NULL DEFAULT (datetime('now')),
                 PRIMARY KEY (order_id, category_id)
             );
@@ -96,6 +98,8 @@ async def init_db(poll_interval: int = 30) -> None:
             "ALTER TABLE order_history ADD COLUMN price_min INTEGER DEFAULT 0",
             "ALTER TABLE users ADD COLUMN notify_days INTEGER DEFAULT 31",
             "ALTER TABLE user_keywords ADD COLUMN is_negative INTEGER DEFAULT 0",
+            "ALTER TABLE user_categories ADD COLUMN is_excluded INTEGER DEFAULT 0",
+            "ALTER TABLE order_history ADD COLUMN own_category_id TEXT DEFAULT ''",
         ]:
             try:
                 await db.execute(stmt)
@@ -275,26 +279,52 @@ async def update_utc_offset(user_id: int, utc_offset: int) -> None:
 # ── Категории ──────────────────────────────────────────────────────────────
 
 async def get_user_categories(user_id: int) -> list[dict]:
+    """Разделы, которые пользователь отслеживает."""
+    return await _categories(user_id, excluded=False)
+
+
+async def get_user_excluded_categories(user_id: int) -> list[dict]:
+    """Разделы, заказы из которых пользователю не нужны."""
+    return await _categories(user_id, excluded=True)
+
+
+async def _categories(user_id: int, excluded: bool) -> list[dict]:
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
-            "SELECT * FROM user_categories WHERE user_id = ? ORDER BY category_name",
-            (user_id,),
+            """
+            SELECT * FROM user_categories
+            WHERE user_id = ? AND COALESCE(is_excluded, 0) = ?
+            ORDER BY category_name
+            """,
+            (user_id, int(excluded)),
         ) as cur:
             return [dict(r) for r in await cur.fetchall()]
 
 
-async def add_user_category(user_id: int, category_id: str, category_name: str) -> bool:
-    try:
-        async with aiosqlite.connect(DB_PATH) as db:
-            await db.execute(
-                "INSERT INTO user_categories (user_id, category_id, category_name) VALUES (?, ?, ?)",
-                (user_id, category_id, category_name),
-            )
-            await db.commit()
-        return True
-    except aiosqlite.IntegrityError:
-        return False
+async def add_user_category(
+    user_id: int, category_id: str, category_name: str, excluded: bool = False
+) -> bool:
+    """Добавить раздел в отслеживаемые или в исключения.
+
+    Раздел лежит ровно в одном списке: добавление с другим флагом переносит его,
+    а не создаёт дубль. False означает «уже был в этом списке».
+    """
+    flag = int(excluded)
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute(
+            """
+            INSERT INTO user_categories (user_id, category_id, category_name, is_excluded)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT (user_id, category_id) DO UPDATE SET
+                is_excluded   = ?,
+                category_name = ?
+            WHERE COALESCE(user_categories.is_excluded, 0) <> ?
+            """,
+            (user_id, category_id, category_name, flag, flag, category_name, flag),
+        )
+        await db.commit()
+        return cur.rowcount > 0
 
 
 async def remove_user_category(user_id: int, category_id: str) -> bool:
@@ -417,13 +447,15 @@ async def store_order(order: dict) -> bool:
         cur = await db.execute(
             """
             INSERT OR IGNORE INTO order_history
-                (order_id, category_id, title, description, budget, price_min, category_name, published_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, COALESCE(?, datetime('now')))
+                (order_id, category_id, title, description, budget, price_min,
+                 category_name, own_category_id, published_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, datetime('now')))
             """,
             (
                 order["order_id"], order["category_id"],
                 order["title"], order["description"],
                 order["budget"], order.get("price_min", 0), order["category_name"],
+                order.get("own_category_id", ""),
                 order.get("published_at"),
             ),
         )
@@ -469,17 +501,22 @@ async def get_all_monitored_categories() -> list[str]:
             FROM user_categories uc
             JOIN users u ON uc.user_id = u.user_id
             WHERE u.is_active = 1
+              AND COALESCE(uc.is_excluded, 0) = 0
             """
         ) as cur:
             categories = [r[0] for r in await cur.fetchall()]
 
-        # Пользователь без выбранных категорий смотрит общую ленту всех разделов
+        # Пользователь без выбранных категорий смотрит общую ленту всех разделов.
+        # Одни только исключения категорией выбора не считаются — это по-прежнему
+        # общая лента, просто из неё выкидывают лишние разделы при доставке.
         async with db.execute(
             """
             SELECT 1 FROM users u
             WHERE u.is_active = 1
               AND NOT EXISTS (
-                  SELECT 1 FROM user_categories uc WHERE uc.user_id = u.user_id
+                  SELECT 1 FROM user_categories uc
+                  WHERE uc.user_id = u.user_id
+                    AND COALESCE(uc.is_excluded, 0) = 0
               )
             LIMIT 1
             """

@@ -45,6 +45,7 @@ def main_reply_kb() -> ReplyKeyboardMarkup:
 def filters_kb() -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.row(InlineKeyboardButton(text="➕ Добавить категорию", callback_data="browse_cats"))
+    builder.row(InlineKeyboardButton(text="🚫 Исключить категорию", callback_data="browse_excl"))
     builder.row(InlineKeyboardButton(text="💰 Фильтр по цене",    callback_data="edit_price"))
     builder.row(InlineKeyboardButton(text="🔍 Ключевые слова",    callback_data="kw_list"))
     return builder.as_markup()
@@ -52,7 +53,9 @@ def filters_kb() -> InlineKeyboardMarkup:
 
 # ── Inline: мои категории ───────────────────────────────────────────────────
 
-def my_categories_kb(categories: list[dict]) -> InlineKeyboardMarkup:
+def my_categories_kb(
+    categories: list[dict], excluded: list[dict] | None = None
+) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     for cat in categories:
         builder.row(
@@ -62,29 +65,52 @@ def my_categories_kb(categories: list[dict]) -> InlineKeyboardMarkup:
             ),
             InlineKeyboardButton(text="❌", callback_data=f"del_cat:{cat['category_id']}"),
         )
+    for cat in excluded or []:
+        builder.row(
+            InlineKeyboardButton(
+                text=f"🚫 {cat['category_name']} #{cat['category_id']}",
+                callback_data="noop",
+            ),
+            InlineKeyboardButton(text="❌", callback_data=f"del_cat:{cat['category_id']}"),
+        )
     builder.row(InlineKeyboardButton(text="➕ Добавить категорию", callback_data="browse_cats"))
+    builder.row(InlineKeyboardButton(text="🚫 Исключить категорию", callback_data="browse_excl"))
     return builder.as_markup()
 
 
 # ── Inline: браузер групп категорий ────────────────────────────────────────
+# mode="add" — выбираем, что отслеживать; mode="excl" — что выкинуть из ленты.
 
-def category_groups_kb() -> InlineKeyboardMarkup:
+def _cat_callbacks(mode: str) -> tuple[str, str, str, str]:
+    """(группа, добавить, убрать, ручной ввод) — префиксы callback_data."""
+    if mode == "excl":
+        return "xgroup", "add_excl", "rm_excl", "xcat_manual"
+    return "catgroup", "add_cat", "rm_from_group", "cat_manual"
+
+
+def category_groups_kb(mode: str = "add") -> InlineKeyboardMarkup:
+    group_cb, _, _, manual_cb = _cat_callbacks(mode)
     builder = InlineKeyboardBuilder()
     for group in KWORK_CATEGORIES:
-        builder.row(InlineKeyboardButton(text=group, callback_data=f"catgroup:{group}"))
-    builder.row(InlineKeyboardButton(text="✏️ Ввести ID вручную", callback_data="cat_manual"))
+        builder.row(InlineKeyboardButton(text=group, callback_data=f"{group_cb}:{group}"))
+    builder.row(InlineKeyboardButton(text="✏️ Ввести ID вручную", callback_data=manual_cb))
     builder.row(InlineKeyboardButton(text="🔙 Назад", callback_data="my_cats"))
     return builder.as_markup()
 
 
-def category_list_kb(group: str, user_cat_ids: set[str]) -> InlineKeyboardMarkup:
+def category_list_kb(
+    group: str, user_cat_ids: set[str], mode: str = "add"
+) -> InlineKeyboardMarkup:
+    _, add_cb, rm_cb, _ = _cat_callbacks(mode)
+    mark = "🚫" if mode == "excl" else "✅"
+    back = "browse_excl" if mode == "excl" else "browse_cats"
     builder = InlineKeyboardBuilder()
     for cat_id, name in KWORK_CATEGORIES[group]:
         already = cat_id in user_cat_ids
-        label = f"✅ {name} #{cat_id}" if already else f"{name} #{cat_id}"
-        cb    = f"rm_from_group:{cat_id}" if already else f"add_cat:{cat_id}"
+        label = f"{mark} {name} #{cat_id}" if already else f"{name} #{cat_id}"
+        cb    = f"{rm_cb}:{cat_id}" if already else f"{add_cb}:{cat_id}"
         builder.row(InlineKeyboardButton(text=label, callback_data=cb))
-    builder.row(InlineKeyboardButton(text="🔙 К группам", callback_data="browse_cats"))
+    builder.row(InlineKeyboardButton(text="🔙 К группам", callback_data=back))
     return builder.as_markup()
 
 

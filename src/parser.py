@@ -83,15 +83,18 @@ async def _fetch_page(
         return []
 
 
-def _category_name(order: dict, category_id: str) -> str:
+def _category_name(own_id: str, category_id: str) -> str:
     # В общей ленте раздел у каждого заказа свой — берём его из самого заказа.
     if category_id == ALL_CATEGORIES:
-        own = str(order.get("category_id") or "")
-        return CATEGORY_NAME_BY_ID.get(own, "Все категории")
+        return CATEGORY_NAME_BY_ID.get(own_id, "Все категории")
     return CATEGORY_NAME_BY_ID.get(category_id, f"Категория {category_id}")
 
 
 def _build_order(raw: dict, category_id: str) -> dict:
+    # own_category_id — настоящий раздел заказа. В общей ленте он единственный
+    # способ понять, откуда заказ: сама запись лежит под псевдо-категорией «all»,
+    # а по этому полю работают минус-категории пользователя.
+    own_id = str(raw.get("category_id") or "")
     return {
         "order_id":      int(raw["id"]),
         "title":         _clean(raw.get("name")) or "Без названия",
@@ -99,7 +102,8 @@ def _build_order(raw: dict, category_id: str) -> dict:
         "budget":        _budget_str(raw),
         "price_min":     _fmt_price(raw.get("priceLimit")),
         "category_id":   category_id,
-        "category_name": _category_name(raw, category_id),
+        "own_category_id": own_id,
+        "category_name": _category_name(own_id, category_id),
         "published_at":  _published_at(raw),
     }
 

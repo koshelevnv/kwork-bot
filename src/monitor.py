@@ -9,6 +9,7 @@ from src.database import (
     cleanup_order_history, get_all_monitored_categories,
     get_all_monitored_keywords, get_all_monitored_packs,
     get_due_users, get_orders_since, get_user_categories,
+    get_user_excluded_categories,
     get_user_keywords, get_user_minus_words, get_user_packs,
     store_order, update_last_notified, get_global_settings,
 )
@@ -40,6 +41,8 @@ async def _deliver(bot: Bot, user: dict) -> None:
         cats = await get_user_categories(uid)
         # Пустой список категорий = без фильтра, заказы из всех разделов
         cat_ids = [c["category_id"] for c in cats] or [ALL_CATEGORIES]
+        # Минус-категории: разделы, которые выкидываем из общей ленты
+        excluded = {c["category_id"] for c in await get_user_excluded_categories(uid)}
 
         utc_offset  = user.get("utc_offset", 3)
         notify_from = user.get("notify_from", 0)
@@ -60,6 +63,13 @@ async def _deliver(bot: Bot, user: dict) -> None:
 
         sent = 0
         for order in orders:
+            # Минус-категории. Записи общей ленты лежат под «all», настоящий
+            # раздел заказа — в own_category_id (у старых записей его нет).
+            if excluded:
+                own = order.get("own_category_id") or order["category_id"]
+                if own in excluded:
+                    continue
+
             # Фильтр по времени публикации в часовом поясе пользователя
             try:
                 pub_utc   = datetime.fromisoformat(order["published_at"])

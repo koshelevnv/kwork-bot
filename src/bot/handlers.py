@@ -110,13 +110,15 @@ async def cmd_start(message: Message, settings: Settings) -> None:
                 except Exception:
                     pass
 
-    cats = await get_user_categories(message.from_user.id)
-    kws  = await get_user_keywords(message.from_user.id)
+    cats  = await get_user_categories(message.from_user.id)
+    kws   = await get_user_keywords(message.from_user.id)
+    packs = await get_user_packs(message.from_user.id)
     await message.answer(
         f"👋 Привет, <b>{message.from_user.first_name}</b>!\n\n"
         "Я слежу за новыми заказами на kwork.ru и присылаю их сюда.\n\n"
         f"📋 Категорий: <b>{len(cats)}</b>\n"
-        f"🔍 Ключевых слов: <b>{len(kws)}</b>\n\n"
+        f"📦 Тем: <b>{len(packs)}</b>\n"
+        f"🔍 Своих слов: <b>{len(kws)}</b>\n\n"
         + (NO_CATEGORIES_HINT if not cats else "Используй кнопки ниже 👇"),
         parse_mode="HTML",
         reply_markup=main_reply_kb(),
@@ -130,11 +132,14 @@ async def btn_status(message: Message, settings: Settings) -> None:
     await _reg(message, settings)
     uid  = message.from_user.id
     user = await get_user(uid)
-    cats = await get_user_categories(uid)
-    kws  = await get_user_keywords(uid)
+    cats  = await get_user_categories(uid)
+    kws   = await get_user_keywords(uid)
+    packs = await get_user_packs(uid)
+    minus = await get_user_minus_words(uid)
 
-    cat_lines = "\n".join(f"  • {c['category_name']}" for c in cats) or "  все разделы (фильтр не задан)"
-    kw_lines  = ", ".join(kws) or "нет (все заказы)"
+    cat_lines  = "\n".join(f"  • {c['category_name']}" for c in cats) or "  все разделы (фильтр не задан)"
+    pack_lines = ", ".join(pack_title(p) for p in packs)
+    kw_lines   = ", ".join(kws)
 
     interval    = user.get("poll_interval", 30) if user else 30
     notify_from = user.get("notify_from", 0) if user else 0
@@ -156,6 +161,17 @@ async def btn_status(message: Message, settings: Settings) -> None:
     else:
         price_label = f"{price_from:,} – {price_to:,} ₽".replace(",", " ")
 
+    if packs or kws:
+        word_lines = []
+        if packs:
+            word_lines.append(f"<b>Темы ({len(packs)}):</b> {pack_lines}")
+        if kws:
+            word_lines.append(f"<b>Свои слова:</b> {kw_lines}")
+    else:
+        word_lines = ["<b>Фильтр по словам:</b> не задан (все заказы)"]
+    if minus:
+        word_lines.append(f"<b>Минус-слова:</b> {', '.join(minus)}")
+
     await message.answer(
         f"📊 <b>Ваши настройки</b>\n\n"
         f"⏱ Частота уведомлений: {interval} сек\n"
@@ -164,7 +180,7 @@ async def btn_status(message: Message, settings: Settings) -> None:
         f"🌍 Часовой пояс: UTC{sign}{utc_offset}\n"
         f"💰 Цена: {price_label}\n\n"
         f"<b>Категории ({len(cats)}):</b>\n{cat_lines}\n\n"
-        f"<b>Ключевые слова:</b> {kw_lines}"
+        + "\n".join(word_lines)
         + ("" if cats else f"\n\n{NO_CATEGORIES_HINT}"),
         parse_mode="HTML",
     )

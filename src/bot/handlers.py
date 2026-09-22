@@ -24,8 +24,8 @@ from src.database import (
 router = Router()
 
 NO_CATEGORIES_HINT = (
-    "⚠️ <b>Категории не выбраны — уведомлений не будет.</b>\n"
-    "Открой «🎛 Фильтры» → «➕ Добавить категорию» и отметь нужные."
+    "🌐 <b>Категории не выбраны — присылаю заказы из всех разделов.</b>\n"
+    "Чтобы сузить: «🎛 Фильтры» → «➕ Добавить категорию»."
 )
 
 
@@ -130,7 +130,7 @@ async def btn_status(message: Message, settings: Settings) -> None:
     cats = await get_user_categories(uid)
     kws  = await get_user_keywords(uid)
 
-    cat_lines = "\n".join(f"  • {c['category_name']}" for c in cats) or "  нет"
+    cat_lines = "\n".join(f"  • {c['category_name']}" for c in cats) or "  все разделы (фильтр не задан)"
     kw_lines  = ", ".join(kws) or "нет (все заказы)"
 
     interval    = user.get("poll_interval", 30) if user else 30
@@ -187,7 +187,8 @@ async def _show_my_cats(msg: Message, user_id: int, edit: bool = False) -> None:
     text = (
         f"📋 <b>Ваши категории</b> ({len(cats)})\n\nНажми ❌ чтобы удалить 👇"
         if cats else
-        "📋 У вас нет отслеживаемых категорий.\n\nНажми <b>Добавить категорию</b> 👇"
+        "📋 Категории не выбраны — приходят заказы из <b>всех разделов</b>.\n\n"
+        "Нажми <b>Добавить категорию</b>, чтобы оставить только нужные 👇"
     )
     kb = my_categories_kb(cats)
     if edit:

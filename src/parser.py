@@ -7,10 +7,13 @@ import aiohttp
 import orjson
 from loguru import logger
 
-from src.constants import HEADERS, KWORK_API_URL, CATEGORY_NAME_BY_ID
+from src.constants import HEADERS, KWORK_API_URL, CATEGORY_NAME_BY_ID, ALL_CATEGORIES
 
 _TIMEOUT = aiohttp.ClientTimeout(total=10)
 _KWORK_TZ_OFFSET = timedelta(hours=3)  # kwork отдаёт даты по Москве (UTC+3)
+# Страница общей ленты покрывает всего ~7 минут заказов, поэтому берём две:
+# с запасом хватает даже на максимальный интервал опроса (10 минут).
+_ALL_FEED_PAGES = 2
 
 
 def _clean(text: Any) -> str:
@@ -52,11 +55,14 @@ def _budget_str(order: dict) -> str:
     return f"{price_min:,} ₽".replace(",", " ")
 
 
-async def fetch_orders(session: aiohttp.ClientSession, category_id: str) -> list[dict]:
-    """Получить все заказы со страницы 1 для категории."""
+async def _fetch_page(
+    session: aiohttp.ClientSession, category_id: str, page: int
+) -> list[dict]:
+    """Одна страница выдачи. Без параметра c kwork отдаёт общую ленту всех разделов."""
     data = aiohttp.FormData()
-    data.add_field("c", category_id)
-    data.add_field("page", "1")
+    if category_id != ALL_CATEGORIES:
+        data.add_field("c", category_id)
+    data.add_field("page", str(page))
 
     try:
         async with session.post(
@@ -72,10 +78,27 @@ async def fetch_orders(session: aiohttp.ClientSession, category_id: str) -> list
 
     try:
         payload = orjson.loads(raw)
-        orders: list[dict] = payload.get("data", {}).get("wants", [])
+        return payload.get("data", {}).get("wants", [])
     except Exception as e:
         logger.error(f"Ошибка разбора JSON для категории {category_id}: {e}")
         return []
+
+
+def _category_name(order: dict, category_id: str) -> str:
+    # В общей ленте раздел у каждого заказа свой — берём его из самого заказа.
+    if category_id == ALL_CATEGORIES:
+        own = str(order.get("category_id") or "")
+        return CATEGORY_NAME_BY_ID.get(own, "Все категории")
+    return CATEGORY_NAME_BY_ID.get(category_id, f"Категория {category_id}")
+
+
+async def fetch_orders(session: aiohttp.ClientSession, category_id: str) -> list[dict]:
+    """Свежие заказы категории или всей ленты, если category_id == ALL_CATEGORIES."""
+    pages = _ALL_FEED_PAGES if category_id == ALL_CATEGORIES else 1
+
+    orders: list[dict] = []
+    for page in range(1, pages + 1):
+        orders.extend(await _fetch_page(session, category_id, page))
 
     return [
         {
@@ -85,7 +108,7 @@ async def fetch_orders(session: aiohttp.ClientSession, category_id: str) -> list
             "budget":        _budget_str(o),
             "price_min":     _fmt_price(o.get("priceLimit")),
             "category_id":   category_id,
-            "category_name": CATEGORY_NAME_BY_ID.get(category_id, f"Категория {category_id}"),
+            "category_name": _category_name(o, category_id),
             "published_at":  _published_at(o),
         }
         for o in orders

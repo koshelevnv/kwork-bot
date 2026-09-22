@@ -1,6 +1,8 @@
 import aiosqlite
 from pathlib import Path
 
+from src.constants import ALL_CATEGORIES
+
 DB_PATH = Path("kwork_bot.db")
 
 
@@ -393,7 +395,23 @@ async def get_all_monitored_categories() -> list[str]:
             WHERE u.is_active = 1
             """
         ) as cur:
-            return [r[0] for r in await cur.fetchall()]
+            categories = [r[0] for r in await cur.fetchall()]
+
+        # Пользователь без выбранных категорий смотрит общую ленту всех разделов
+        async with db.execute(
+            """
+            SELECT 1 FROM users u
+            WHERE u.is_active = 1
+              AND NOT EXISTS (
+                  SELECT 1 FROM user_categories uc WHERE uc.user_id = u.user_id
+              )
+            LIMIT 1
+            """
+        ) as cur:
+            if await cur.fetchone():
+                categories.append(ALL_CATEGORIES)
+
+        return categories
 
 
 async def get_due_users() -> list[dict]:

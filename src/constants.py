@@ -1,5 +1,9 @@
 KWORK_API_URL = "https://kwork.ru/projects"
 
+# Псевдо-категория: общая лента всех разделов (запрос без параметра c).
+# Пользователь без выбранных категорий получает заказы отсюда.
+ALL_CATEGORIES = "all"
+
 HEADERS = {
     "sec-ch-ua-platform": '"Windows"',
     "X-Requested-With": "XMLHttpRequest",

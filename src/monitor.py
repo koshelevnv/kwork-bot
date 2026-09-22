@@ -11,6 +11,7 @@ from src.database import (
     get_user_keywords, store_order, update_last_notified,
     get_global_settings,
 )
+from src.constants import ALL_CATEGORIES
 from src.notifier import send_order
 from src.parser import fetch_orders
 
@@ -28,11 +29,8 @@ async def _deliver(bot: Bot, user: dict) -> None:
     uid = user["user_id"]
     try:
         cats = await get_user_categories(uid)
-        cat_ids = [c["category_id"] for c in cats]
-
-        if not cat_ids:
-            await update_last_notified(uid)
-            return
+        # Пустой список категорий = без фильтра, заказы из всех разделов
+        cat_ids = [c["category_id"] for c in cats] or [ALL_CATEGORIES]
 
         utc_offset  = user.get("utc_offset", 3)
         notify_from = user.get("notify_from", 0)
@@ -116,12 +114,9 @@ async def monitoring_loop(bot: Bot) -> None:
                     f"Фетч: категорий {len(categories)}, заказов {fetched}, новых {fresh}"
                 )
             elif not idle_warned:
-                # Без категорий парсер молчит — самая частая причина «бот ничего не присылает»
-                logger.warning(
-                    "Ни у одного пользователя не выбрано ни одной категории — "
-                    "мониторинг простаивает. Добавь категории в боте: "
-                    "«🎛 Фильтры» → «➕ Добавить категорию»."
-                )
+                # Список пуст только когда нет ни одного активного пользователя:
+                # пользователь без выбранных категорий даёт псевдо-категорию «все».
+                logger.warning("Нет активных пользователей — мониторинг простаивает")
                 idle_warned = True
 
             # 2. Доставка пользователям с истёкшим интервалом

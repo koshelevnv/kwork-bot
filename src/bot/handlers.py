@@ -23,6 +23,11 @@ from src.database import (
 
 router = Router()
 
+NO_CATEGORIES_HINT = (
+    "⚠️ <b>Категории не выбраны — уведомлений не будет.</b>\n"
+    "Открой «🎛 Фильтры» → «➕ Добавить категорию» и отметь нужные."
+)
+
 
 class Form(StatesGroup):
     add_keyword    = State()
@@ -45,7 +50,18 @@ async def cmd_cancel(message: Message, state: FSMContext) -> None:
 
 async def _reg(event: Message | CallbackQuery, settings: Settings) -> tuple[bool, bool]:
     user = event.from_user
-    return await upsert_user(user.id, user.username, user.first_name or "", settings.admin_ids)
+    seed_categories = [
+        (cat_id, CATEGORY_NAME_BY_ID.get(cat_id, f"Категория {cat_id}"))
+        for cat_id in settings.categories
+    ]
+    return await upsert_user(
+        user.id,
+        user.username,
+        user.first_name or "",
+        settings.admin_ids,
+        seed_categories=seed_categories,
+        poll_interval=settings.poll_interval,
+    )
 
 
 async def _settings_kb_for(user_id: int) -> tuple[dict, InlineKeyboardMarkup]:
@@ -98,7 +114,7 @@ async def cmd_start(message: Message, settings: Settings) -> None:
         "Я слежу за новыми заказами на kwork.ru и присылаю их сюда.\n\n"
         f"📋 Категорий: <b>{len(cats)}</b>\n"
         f"🔍 Ключевых слов: <b>{len(kws)}</b>\n\n"
-        "Используй кнопки ниже 👇",
+        + (NO_CATEGORIES_HINT if not cats else "Используй кнопки ниже 👇"),
         parse_mode="HTML",
         reply_markup=main_reply_kb(),
     )
@@ -145,7 +161,8 @@ async def btn_status(message: Message, settings: Settings) -> None:
         f"🌍 Часовой пояс: UTC{sign}{utc_offset}\n"
         f"💰 Цена: {price_label}\n\n"
         f"<b>Категории ({len(cats)}):</b>\n{cat_lines}\n\n"
-        f"<b>Ключевые слова:</b> {kw_lines}",
+        f"<b>Ключевые слова:</b> {kw_lines}"
+        + ("" if cats else f"\n\n{NO_CATEGORIES_HINT}"),
         parse_mode="HTML",
     )
 

@@ -4,7 +4,7 @@ from pathlib import Path
 DB_PATH = Path("kwork_bot.db")
 
 
-async def init_db() -> None:
+async def init_db(poll_interval: int = 30) -> None:
     async with aiosqlite.connect(DB_PATH) as db:
         await db.executescript("""
             CREATE TABLE IF NOT EXISTS users (
@@ -68,8 +68,13 @@ async def init_db() -> None:
                 fetch_interval    INTEGER NOT NULL DEFAULT 30,
                 registration_open INTEGER NOT NULL DEFAULT 0
             );
-            INSERT OR IGNORE INTO global_settings (id) VALUES (1);
         """)
+        # Интервал опроса из .env применяется только при создании БД,
+        # дальше им управляет администратор через меню бота.
+        await db.execute(
+            "INSERT OR IGNORE INTO global_settings (id, fetch_interval) VALUES (1, ?)",
+            (poll_interval,),
+        )
         # Миграции для существующих БД без новых колонок
         for stmt in [
             "ALTER TABLE users ADD COLUMN poll_interval   INTEGER DEFAULT 30",
@@ -91,8 +96,16 @@ async def init_db() -> None:
 
 # ── Пользователи ───────────────────────────────────────────────────────────
 
-async def upsert_user(user_id: int, username: str | None, first_name: str, admin_ids: list[int]) -> tuple[bool, bool]:
+async def upsert_user(
+    user_id: int,
+    username: str | None,
+    first_name: str,
+    admin_ids: list[int],
+    seed_categories: list[tuple[str, str]] | None = None,
+    poll_interval: int = 30,
+) -> tuple[bool, bool]:
     """Регистрирует или обновляет пользователя.
+    Новому пользователю проставляются категории и интервал по умолчанию из .env.
     Возвращает (registered, is_new): registered=False если регистрация закрыта."""
     async with aiosqlite.connect(DB_PATH) as db:
         async with db.execute("SELECT is_admin FROM users WHERE user_id = ?", (user_id,)) as cur:
@@ -118,10 +131,16 @@ async def upsert_user(user_id: int, username: str | None, first_name: str, admin
                 is_admin = 1 if user_id in admin_ids else 0
 
             await db.execute(
-                """INSERT INTO users (user_id, username, first_name, is_admin, last_notified_at)
-                   VALUES (?, ?, ?, ?, datetime('now'))""",
-                (user_id, username, first_name, is_admin),
+                """INSERT INTO users (user_id, username, first_name, is_admin, poll_interval, last_notified_at)
+                   VALUES (?, ?, ?, ?, ?, datetime('now'))""",
+                (user_id, username, first_name, is_admin, poll_interval),
             )
+            for cat_id, cat_name in (seed_categories or []):
+                await db.execute(
+                    """INSERT OR IGNORE INTO user_categories (user_id, category_id, category_name)
+                       VALUES (?, ?, ?)""",
+                    (user_id, cat_id, cat_name),
+                )
             await db.commit()
             return True, True
         else:
@@ -320,13 +339,14 @@ async def store_order(order: dict) -> bool:
         cur = await db.execute(
             """
             INSERT OR IGNORE INTO order_history
-                (order_id, category_id, title, description, budget, price_min, category_name)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+                (order_id, category_id, title, description, budget, price_min, category_name, published_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, COALESCE(?, datetime('now')))
             """,
             (
                 order["order_id"], order["category_id"],
                 order["title"], order["description"],
                 order["budget"], order.get("price_min", 0), order["category_name"],
+                order.get("published_at"),
             ),
         )
         await db.commit()

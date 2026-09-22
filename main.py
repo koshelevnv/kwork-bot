@@ -1,4 +1,5 @@
 import asyncio
+import signal
 
 from aiogram import Bot, Dispatcher
 from aiogram.fsm.storage.memory import MemoryStorage
@@ -22,7 +23,7 @@ async def main() -> None:
 
     logger.add("logs/parser.log", rotation="1 week", retention="1 month", compression="zip")
 
-    await init_db()
+    await init_db(settings.poll_interval)
     await reset_all_last_notified()
     logger.info("База данных готова")
 
@@ -38,11 +39,31 @@ async def main() -> None:
     dp["settings"] = settings
     dp.include_router(router)
 
-    await asyncio.gather(
-        dp.start_polling(bot, skip_updates=True),
+    tasks = asyncio.gather(
+        # handle_signals=False: сигналы обрабатываем сами, иначе aiogram гасит
+        # только поллинг, а мониторинг продолжает крутиться и systemd ждёт таймаут
+        dp.start_polling(bot, skip_updates=True, handle_signals=False),
         monitoring_loop(bot),
     )
 
+    # Без этого SIGTERM от systemd игнорируется и остановка занимает 90 секунд
+    loop = asyncio.get_running_loop()
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        try:
+            loop.add_signal_handler(sig, tasks.cancel)
+        except NotImplementedError:
+            pass  # Windows: сигналы сюда не приходят, работает KeyboardInterrupt
+
+    try:
+        await tasks
+    except asyncio.CancelledError:
+        logger.info("Получен сигнал остановки — завершаемся")
+    finally:
+        await bot.session.close()
+
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        logger.info("Остановлено пользователем")

@@ -91,22 +91,38 @@ async def _deliver(bot: Bot, user: dict) -> None:
 async def monitoring_loop(bot: Bot) -> None:
     logger.info("Мониторинг запущен")
     cleanup_counter = 0
+    idle_warned = False
 
     async with aiohttp.ClientSession() as session:
         while True:
             # 1. Фетч всех категорий → запись в order_history
             categories = await get_all_monitored_categories()
             if categories:
+                idle_warned = False
                 results = await asyncio.gather(
                     *[fetch_orders(session, cat) for cat in categories],
                     return_exceptions=True,
                 )
+                fetched = fresh = 0
                 for cat_id, result in zip(categories, results):
                     if isinstance(result, Exception):
-                        logger.exception(f"Ошибка фетча категории {cat_id}: {result}")
+                        logger.error(f"Ошибка фетча категории {cat_id}: {result!r}")
                         continue
                     for order in result:
-                        await store_order(order)
+                        fetched += 1
+                        if await store_order(order):
+                            fresh += 1
+                logger.debug(
+                    f"Фетч: категорий {len(categories)}, заказов {fetched}, новых {fresh}"
+                )
+            elif not idle_warned:
+                # Без категорий парсер молчит — самая частая причина «бот ничего не присылает»
+                logger.warning(
+                    "Ни у одного пользователя не выбрано ни одной категории — "
+                    "мониторинг простаивает. Добавь категории в боте: "
+                    "«🎛 Фильтры» → «➕ Добавить категорию»."
+                )
+                idle_warned = True
 
             # 2. Доставка пользователям с истёкшим интервалом
             due_users = await get_due_users()

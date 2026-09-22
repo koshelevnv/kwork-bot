@@ -90,6 +90,8 @@ async def _settings_kb_for(user_id: int) -> tuple[dict, InlineKeyboardMarkup]:
 
 @router.message(CommandStart())
 @router.message(F.text == "🚀 Запустить бота")
+@router.message(F.text == "🏠 Главная / Обновить")
+# Старое название: у кого клавиатура ещё не обновилась, кнопка продолжает работать.
 @router.message(F.text == "🔄 Перезапустить бота")
 async def cmd_start(message: Message, settings: Settings) -> None:
     registered, is_new = await _reg(message, settings)
@@ -206,6 +208,8 @@ async def btn_status(message: Message, settings: Settings) -> None:
 
 
 # ── Мои категории ──────────────────────────────────────────────────────────
+# С основной клавиатуры кнопка убрана — список открывается из «🎛 Фильтры».
+# Текстовый хендлер оставлен для клавиатур, которые ещё не перерисовались.
 
 @router.message(F.text == "📋 Мои категории")
 async def btn_my_cats(message: Message, settings: Settings) -> None:

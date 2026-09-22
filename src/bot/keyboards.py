@@ -31,19 +31,19 @@ def start_kb() -> ReplyKeyboardMarkup:
 def main_reply_kb() -> ReplyKeyboardMarkup:
     builder = ReplyKeyboardBuilder()
     builder.row(
-        KeyboardButton(text="📋 Мои категории"),
         KeyboardButton(text="🎛 Фильтры"),
+        KeyboardButton(text="📊 Статус"),
     )
     builder.row(
-        KeyboardButton(text="📊 Статус"),
         KeyboardButton(text="⚙️ Настройки"),
+        KeyboardButton(text="🏠 Главная / Обновить"),
     )
-    builder.row(KeyboardButton(text="🔄 Перезапустить бота"))
     return builder.as_markup(resize_keyboard=True)
 
 
 def filters_kb() -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
+    builder.row(InlineKeyboardButton(text="📋 Мои категории",     callback_data="my_cats"))
     builder.row(InlineKeyboardButton(text="➕ Добавить категорию", callback_data="browse_cats"))
     builder.row(InlineKeyboardButton(text="🚫 Исключить категорию", callback_data="browse_excl"))
     builder.row(InlineKeyboardButton(text="💰 Фильтр по цене",    callback_data="edit_price"))

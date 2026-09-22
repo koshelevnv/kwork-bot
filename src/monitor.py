@@ -7,15 +7,24 @@ from loguru import logger
 
 from src.database import (
     cleanup_order_history, get_all_monitored_categories,
+    get_all_monitored_keywords, get_all_monitored_packs,
     get_due_users, get_orders_since, get_user_categories,
-    get_user_keywords, store_order, update_last_notified,
-    get_global_settings,
+    get_user_keywords, get_user_minus_words, get_user_packs,
+    store_order, update_last_notified, get_global_settings,
 )
 from src.constants import ALL_CATEGORIES
+from src.matching import order_matches
 from src.notifier import send_order
-from src.parser import fetch_orders
+from src.parser import fetch_orders, fetch_orders_by_keyword
+from src.topics import pack_keywords, pack_search_terms
 
 _CLEANUP_EVERY = 120  # итераций до очистки истории (~1 час)
+# Поиск на kwork — дополнительный источник к ленте: он находит заказы старше
+# двух страниц и сам сшивает «телеграм» с «Telegram». Гонять его каждые 30
+# секунд незачем, поэтому раз в несколько циклов и с потолком по числу слов.
+_SEARCH_EVERY = 4
+_SEARCH_TERMS_LIMIT = 20
+_SEARCH_PAUSE = 0.3  # секунд между запросами к поиску
 
 
 def _in_window(hour: int, frm: int, to: int) -> bool:
@@ -46,7 +55,8 @@ async def _deliver(bot: Bot, user: dict) -> None:
 
         since    = user["last_notified_at"]
         orders   = await get_orders_since(cat_ids, since)
-        keywords = await get_user_keywords(uid)
+        keywords = await get_user_keywords(uid) + pack_keywords(await get_user_packs(uid))
+        minus    = await get_user_minus_words(uid)
 
         sent = 0
         for order in orders:
@@ -68,11 +78,11 @@ async def _deliver(bot: Bot, user: dict) -> None:
                 if price_to > 0 and order_price > price_to:
                     continue
 
-            # Фильтр по ключевым словам
-            if keywords:
-                text = (order["title"] + " " + order["description"]).lower()
-                if not any(kw in text for kw in keywords):
-                    continue
+            # Фильтр по ключевым словам: пустой список = проходят все заказы
+            if not order_matches(
+                order["title"] + " " + order["description"], keywords, minus
+            ):
+                continue
 
             await send_order(bot=bot, chat_id=uid, order=order)
             sent += 1
@@ -86,9 +96,42 @@ async def _deliver(bot: Bot, user: dict) -> None:
         await update_last_notified(uid)
 
 
+async def _search_terms() -> list[str]:
+    """Слова для поиска на kwork: свои слова пользователей плюс семена тем."""
+    terms = await get_all_monitored_keywords()
+    for term in pack_search_terms(await get_all_monitored_packs()):
+        if term not in terms:
+            terms.append(term)
+    return terms[:_SEARCH_TERMS_LIMIT]
+
+
+async def _fetch_from_search(session: aiohttp.ClientSession) -> tuple[int, int]:
+    """Запросы к поиску kwork. Заказ кладётся и в свой раздел, и в общую ленту,
+    чтобы его увидели и те, кто выбрал категории, и те, кто читает всё подряд."""
+    terms = await _search_terms()
+    fetched = fresh = 0
+    for term in terms:
+        try:
+            orders = await fetch_orders_by_keyword(session, term)
+        except Exception as e:
+            logger.warning(f"Ошибка поиска «{term}»: {e!r}")
+            continue
+        for order in orders:
+            fetched += 1
+            if await store_order(order):
+                fresh += 1
+            if order["category_id"] != ALL_CATEGORIES:
+                await store_order({**order, "category_id": ALL_CATEGORIES})
+        await asyncio.sleep(_SEARCH_PAUSE)
+    if terms:
+        logger.debug(f"Поиск kwork: слов {len(terms)}, заказов {fetched}, новых {fresh}")
+    return fetched, fresh
+
+
 async def monitoring_loop(bot: Bot) -> None:
     logger.info("Мониторинг запущен")
     cleanup_counter = 0
+    search_counter = 0
     idle_warned = False
 
     async with aiohttp.ClientSession() as session:
@@ -119,12 +162,18 @@ async def monitoring_loop(bot: Bot) -> None:
                 logger.warning("Нет активных пользователей — мониторинг простаивает")
                 idle_warned = True
 
-            # 2. Доставка пользователям с истёкшим интервалом
+            # 2. Поиск по словам на самом kwork — добор к ленте
+            search_counter += 1
+            if search_counter >= _SEARCH_EVERY:
+                search_counter = 0
+                await _fetch_from_search(session)
+
+            # 3. Доставка пользователям с истёкшим интервалом
             due_users = await get_due_users()
             if due_users:
                 await asyncio.gather(*[_deliver(bot, user) for user in due_users])
 
-            # 3. Периодическая очистка истории
+            # 4. Периодическая очистка истории
             cleanup_counter += 1
             if cleanup_counter >= _CLEANUP_EVERY:
                 await cleanup_order_history()

@@ -56,13 +56,12 @@ def _budget_str(order: dict) -> str:
 
 
 async def _fetch_page(
-    session: aiohttp.ClientSession, category_id: str, page: int
+    session: aiohttp.ClientSession, fields: dict[str, str], label: str
 ) -> list[dict]:
-    """Одна страница выдачи. Без параметра c kwork отдаёт общую ленту всех разделов."""
+    """Одна страница выдачи. Без поля c kwork отдаёт общую ленту всех разделов."""
     data = aiohttp.FormData()
-    if category_id != ALL_CATEGORIES:
-        data.add_field("c", category_id)
-    data.add_field("page", str(page))
+    for name, value in fields.items():
+        data.add_field(name, value)
 
     try:
         async with session.post(
@@ -70,17 +69,17 @@ async def _fetch_page(
         ) as resp:
             raw = await resp.read()
     except asyncio.TimeoutError:
-        logger.warning(f"Таймаут для категории {category_id}")
+        logger.warning(f"Таймаут для {label}")
         return []
     except aiohttp.ClientError as e:
-        logger.warning(f"Сетевая ошибка для категории {category_id}: {e}")
+        logger.warning(f"Сетевая ошибка для {label}: {e}")
         return []
 
     try:
         payload = orjson.loads(raw)
         return payload.get("data", {}).get("wants", [])
     except Exception as e:
-        logger.error(f"Ошибка разбора JSON для категории {category_id}: {e}")
+        logger.error(f"Ошибка разбора JSON для {label}: {e}")
         return []
 
 
@@ -92,25 +91,49 @@ def _category_name(order: dict, category_id: str) -> str:
     return CATEGORY_NAME_BY_ID.get(category_id, f"Категория {category_id}")
 
 
+def _build_order(raw: dict, category_id: str) -> dict:
+    return {
+        "order_id":      int(raw["id"]),
+        "title":         _clean(raw.get("name")) or "Без названия",
+        "description":   _clean(raw.get("description"))[:2000].strip(),
+        "budget":        _budget_str(raw),
+        "price_min":     _fmt_price(raw.get("priceLimit")),
+        "category_id":   category_id,
+        "category_name": _category_name(raw, category_id),
+        "published_at":  _published_at(raw),
+    }
+
+
 async def fetch_orders(session: aiohttp.ClientSession, category_id: str) -> list[dict]:
     """Свежие заказы категории или всей ленты, если category_id == ALL_CATEGORIES."""
     pages = _ALL_FEED_PAGES if category_id == ALL_CATEGORIES else 1
 
-    orders: list[dict] = []
+    raw_orders: list[dict] = []
     for page in range(1, pages + 1):
-        orders.extend(await _fetch_page(session, category_id, page))
+        fields = {"page": str(page)}
+        if category_id != ALL_CATEGORIES:
+            fields["c"] = category_id
+        raw_orders.extend(await _fetch_page(session, fields, f"категории {category_id}"))
 
-    return [
-        {
-            "order_id":      int(o["id"]),
-            "title":         _clean(o.get("name")) or "Без названия",
-            "description":   _clean(o.get("description"))[:2000].strip(),
-            "budget":        _budget_str(o),
-            "price_min":     _fmt_price(o.get("priceLimit")),
-            "category_id":   category_id,
-            "category_name": _category_name(o, category_id),
-            "published_at":  _published_at(o),
-        }
-        for o in orders
-        if o.get("id")
-    ]
+    return [_build_order(o, category_id) for o in raw_orders if o.get("id")]
+
+
+async def fetch_orders_by_keyword(
+    session: aiohttp.ClientSession, keyword: str
+) -> list[dict]:
+    """Заказы из поиска самого kwork (поле формы keyword).
+
+    Поиск биржи сам сшивает «телеграм» с «Telegram» и учитывает морфологию, а
+    заодно достаёт заказы старше двух страниц общей ленты. Раздел у каждого
+    найденного заказа свой, поэтому category_id берётся из самого заказа.
+    """
+    raw_orders = await _fetch_page(
+        session, {"keyword": keyword, "page": "1"}, f"поиска «{keyword}»"
+    )
+    orders = []
+    for raw in raw_orders:
+        if not raw.get("id"):
+            continue
+        own = str(raw.get("category_id") or "") or ALL_CATEGORIES
+        orders.append(_build_order(raw, own))
+    return orders

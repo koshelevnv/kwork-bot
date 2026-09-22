@@ -5,6 +5,7 @@ from aiogram.types import (
 from aiogram.utils.keyboard import InlineKeyboardBuilder, ReplyKeyboardBuilder
 
 from src.constants import KWORK_CATEGORIES, TIMEZONES
+from src.topics import TOPIC_PACKS, pack_title
 
 DAYS = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
 
@@ -89,14 +90,43 @@ def category_list_kb(group: str, user_cat_ids: set[str]) -> InlineKeyboardMarkup
 
 # ── Inline: ключевые слова ─────────────────────────────────────────────────
 
-def keywords_kb(keywords: list[str]) -> InlineKeyboardMarkup:
+def keywords_kb(
+    keywords: list[str], minus_words: list[str], packs: list[str]
+) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
+    for pack_id in packs:
+        builder.row(
+            InlineKeyboardButton(text=f"📦 {pack_title(pack_id)}", callback_data="kw_packs"),
+            InlineKeyboardButton(text="❌", callback_data=f"off_pack:{pack_id}"),
+        )
     for kw in keywords:
         builder.row(
             InlineKeyboardButton(text=f"🔑 {kw}", callback_data="noop"),
             InlineKeyboardButton(text="❌", callback_data=f"del_kw:{kw}"),
         )
-    builder.row(InlineKeyboardButton(text="➕ Добавить слово", callback_data="add_kw"))
+    for kw in minus_words:
+        builder.row(
+            InlineKeyboardButton(text=f"🚫 {kw}", callback_data="noop"),
+            InlineKeyboardButton(text="❌", callback_data=f"del_kw:{kw}"),
+        )
+    builder.row(InlineKeyboardButton(text="📦 Темы одной кнопкой", callback_data="kw_packs"))
+    builder.row(
+        InlineKeyboardButton(text="➕ Слово", callback_data="add_kw"),
+        InlineKeyboardButton(text="🚫 Минус-слово", callback_data="add_minus"),
+    )
+    return builder.as_markup()
+
+
+def packs_kb(selected: list[str]) -> InlineKeyboardMarkup:
+    """Темы: одно нажатие включает весь набор синонимов, включая сленг."""
+    builder = InlineKeyboardBuilder()
+    for pack_id, (title, words, _seeds) in TOPIC_PACKS.items():
+        mark = "✅ " if pack_id in selected else ""
+        builder.row(InlineKeyboardButton(
+            text=f"{mark}{title} · {len(words)} слов",
+            callback_data=f"toggle_pack:{pack_id}",
+        ))
+    builder.row(InlineKeyboardButton(text="🔙 К словам", callback_data="kw_list"))
     return builder.as_markup()
 
 

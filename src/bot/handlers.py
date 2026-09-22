@@ -6,16 +6,18 @@ from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup
 
 from src.bot.keyboards import (
     main_reply_kb, start_kb, my_categories_kb, category_groups_kb,
-    category_list_kb, keywords_kb, settings_kb,
+    category_list_kb, keywords_kb, packs_kb, settings_kb,
     hour_grid_kb, timezone_kb, back_kb, cancel_kb, skip_cancel_kb,
     interval_kb, INTERVALS, filters_kb, global_interval_kb, days_kb, DAYS,
 )
 from src.config import Settings
+from src.topics import pack_title
 from src.constants import KWORK_CATEGORIES, TIMEZONES, CATEGORY_NAME_BY_ID
 from src.database import (
     upsert_user, get_user, get_user_categories, add_user_category,
     remove_user_category, get_user_keywords, add_user_keyword,
-    remove_user_keyword, update_poll_interval, update_time_window,
+    remove_user_keyword, get_user_minus_words, get_user_packs,
+    toggle_user_pack, update_poll_interval, update_time_window,
     update_utc_offset, update_price_filter, update_notify_days,
     get_global_settings, update_global_fetch_interval, update_registration_open,
     get_user_count, get_admin_users,
@@ -31,6 +33,7 @@ NO_CATEGORIES_HINT = (
 
 class Form(StatesGroup):
     add_keyword    = State()
+    add_minus_word = State()
     manual_cat     = State()
     set_hour_to    = State()  # от-час выбран, ждём до-час
     set_price_from = State()
@@ -322,19 +325,71 @@ async def cb_kw_list(call: CallbackQuery, settings: Settings) -> None:
 
 
 async def _show_keywords(msg: Message, user_id: int, edit: bool = False) -> None:
-    kws = await get_user_keywords(user_id)
-    text = (
-        f"🔍 <b>Ключевые слова ({len(kws)})</b>\n\n"
-        "Приходят только заказы, где есть хотя бы одно слово.\nНажми ❌ чтобы удалить 👇"
-        if kws else
-        "🔍 <b>Ключевые слова</b>\n\nСписок пуст — проходят <b>все</b> заказы из категорий без фильтров.\n\n"
-        "Добавь слова для фильтрации."
-    )
-    kb = keywords_kb(kws)
+    kws   = await get_user_keywords(user_id)
+    minus = await get_user_minus_words(user_id)
+    packs = await get_user_packs(user_id)
+
+    if kws or packs:
+        lines = ["🔍 <b>Фильтр по словам</b>", ""]
+        if packs:
+            lines.append("📦 Темы: " + ", ".join(pack_title(p) for p in packs))
+        if kws:
+            lines.append("🔑 Свои слова: " + ", ".join(kws))
+        if minus:
+            lines.append("🚫 Минус-слова: " + ", ".join(minus))
+        lines += [
+            "",
+            "Заказ приходит, если встретилось хотя бы одно слово из тем или своих.",
+            "Слова ищутся с учётом окончаний, латиницы и опечаток: «телеграм» "
+            "найдёт и «Telegram», и «тг», и «телеграмм».",
+        ]
+        text = "\n".join(lines)
+    else:
+        text = (
+            "🔍 <b>Фильтр по словам</b>\n\n"
+            "Список пуст — проходят <b>все</b> заказы из выбранных категорий.\n\n"
+            "Проще всего начать с темы: одно нажатие добавит весь набор синонимов "
+            "вместе со сленгом и латиницей."
+        )
+
+    kb = keywords_kb(kws, minus, packs)
     if edit:
         await msg.edit_text(text, parse_mode="HTML", reply_markup=kb)
     else:
         await msg.answer(text, parse_mode="HTML", reply_markup=kb)
+
+
+@router.callback_query(F.data == "kw_packs")
+async def cb_kw_packs(call: CallbackQuery, settings: Settings) -> None:
+    await _reg(call, settings)
+    await call.answer()
+    packs = await get_user_packs(call.from_user.id)
+    await call.message.edit_text(
+        "📦 <b>Темы</b>\n\nОдно нажатие включает весь набор слов по теме — "
+        "сленг, латиницу и сокращения.",
+        parse_mode="HTML",
+        reply_markup=packs_kb(packs),
+    )
+
+
+@router.callback_query(F.data.startswith("toggle_pack:"))
+async def cb_toggle_pack(call: CallbackQuery, settings: Settings) -> None:
+    await _reg(call, settings)
+    pack_id = call.data[len("toggle_pack:"):]
+    enabled = await toggle_user_pack(call.from_user.id, pack_id)
+    await call.answer(("✅ Включено: " if enabled else "❌ Выключено: ") + pack_title(pack_id))
+    packs = await get_user_packs(call.from_user.id)
+    await call.message.edit_reply_markup(reply_markup=packs_kb(packs))
+
+
+@router.callback_query(F.data.startswith("off_pack:"))
+async def cb_off_pack(call: CallbackQuery, settings: Settings) -> None:
+    await _reg(call, settings)
+    pack_id = call.data[len("off_pack:"):]
+    if pack_id in await get_user_packs(call.from_user.id):
+        await toggle_user_pack(call.from_user.id, pack_id)
+    await call.answer("❌ Тема выключена")
+    await _show_keywords(call.message, call.from_user.id, edit=True)
 
 
 @router.callback_query(F.data == "add_kw")
@@ -343,22 +398,48 @@ async def cb_add_kw(call: CallbackQuery, state: FSMContext, settings: Settings) 
     await state.set_state(Form.add_keyword)
     await call.answer()
     await call.message.answer(
-        "Введи ключевое слово или фразу (регистр не важен).",
+        "Введи слово или фразу (регистр не важен). Окончания, латиница и опечатки "
+        "учитываются сами — достаточно корня.",
+        reply_markup=cancel_kb(),
+    )
+
+
+@router.callback_query(F.data == "add_minus")
+async def cb_add_minus(call: CallbackQuery, state: FSMContext, settings: Settings) -> None:
+    await _reg(call, settings)
+    await state.set_state(Form.add_minus_word)
+    await call.answer()
+    await call.message.answer(
+        "Введи минус-слово: заказы с ним не придут, даже если совпало что-то другое.",
         reply_markup=cancel_kb(),
     )
 
 
 @router.message(Form.add_keyword)
 async def process_keyword(message: Message, state: FSMContext, settings: Settings) -> None:
+    await _add_word(message, state, settings, negative=False)
+
+
+@router.message(Form.add_minus_word)
+async def process_minus_word(message: Message, state: FSMContext, settings: Settings) -> None:
+    await _add_word(message, state, settings, negative=True)
+
+
+async def _add_word(
+    message: Message, state: FSMContext, settings: Settings, negative: bool
+) -> None:
     await _reg(message, settings)
     kw = (message.text or "").strip()
     if not kw:
         await message.answer("Пустое слово. Попробуй ещё.", reply_markup=cancel_kb())
         return
-    added = await add_user_keyword(message.from_user.id, kw)
+    added = await add_user_keyword(message.from_user.id, kw, negative=negative)
     await state.clear()
     if added:
-        await message.answer(f"✅ Добавлено: <b>{kw}</b>", parse_mode="HTML", reply_markup=main_reply_kb())
+        mark = "🚫 Минус-слово" if negative else "✅ Добавлено"
+        await message.answer(
+            f"{mark}: <b>{kw}</b>", parse_mode="HTML", reply_markup=main_reply_kb()
+        )
     else:
         await message.answer("Это слово уже есть.", reply_markup=main_reply_kb())
 

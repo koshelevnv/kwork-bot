@@ -42,6 +42,13 @@ async def init_db(poll_interval: int = 30) -> None:
                 FOREIGN KEY (user_id) REFERENCES users(user_id)
             );
 
+            CREATE TABLE IF NOT EXISTS user_packs (
+                user_id INTEGER NOT NULL,
+                pack_id TEXT    NOT NULL,
+                PRIMARY KEY (user_id, pack_id),
+                FOREIGN KEY (user_id) REFERENCES users(user_id)
+            );
+
             CREATE TABLE IF NOT EXISTS order_history (
                 order_id      INTEGER NOT NULL,
                 category_id   TEXT    NOT NULL,
@@ -88,6 +95,7 @@ async def init_db(poll_interval: int = 30) -> None:
             "ALTER TABLE users ADD COLUMN price_to        INTEGER DEFAULT 0",
             "ALTER TABLE order_history ADD COLUMN price_min INTEGER DEFAULT 0",
             "ALTER TABLE users ADD COLUMN notify_days INTEGER DEFAULT 31",
+            "ALTER TABLE user_keywords ADD COLUMN is_negative INTEGER DEFAULT 0",
         ]:
             try:
                 await db.execute(stmt)
@@ -302,20 +310,34 @@ async def remove_user_category(user_id: int, category_id: str) -> bool:
 # ── Ключевые слова ─────────────────────────────────────────────────────────
 
 async def get_user_keywords(user_id: int) -> list[str]:
+    """Слова, по которым заказ проходит фильтр."""
+    return await _keywords(user_id, negative=False)
+
+
+async def get_user_minus_words(user_id: int) -> list[str]:
+    """Слова, по которым заказ отбрасывается, даже если совпало что-то другое."""
+    return await _keywords(user_id, negative=True)
+
+
+async def _keywords(user_id: int, negative: bool) -> list[str]:
     async with aiosqlite.connect(DB_PATH) as db:
         async with db.execute(
-            "SELECT keyword FROM user_keywords WHERE user_id = ? ORDER BY keyword",
-            (user_id,),
+            """
+            SELECT keyword FROM user_keywords
+            WHERE user_id = ? AND COALESCE(is_negative, 0) = ?
+            ORDER BY keyword
+            """,
+            (user_id, int(negative)),
         ) as cur:
             return [r[0] for r in await cur.fetchall()]
 
 
-async def add_user_keyword(user_id: int, keyword: str) -> bool:
+async def add_user_keyword(user_id: int, keyword: str, negative: bool = False) -> bool:
     try:
         async with aiosqlite.connect(DB_PATH) as db:
             await db.execute(
-                "INSERT INTO user_keywords (user_id, keyword) VALUES (?, ?)",
-                (user_id, keyword.strip().lower()),
+                "INSERT INTO user_keywords (user_id, keyword, is_negative) VALUES (?, ?, ?)",
+                (user_id, keyword.strip().lower(), int(negative)),
             )
             await db.commit()
         return True
@@ -331,6 +353,60 @@ async def remove_user_keyword(user_id: int, keyword: str) -> bool:
         )
         await db.commit()
         return cur.rowcount > 0
+
+
+# ── Тематические паки ──────────────────────────────────────────────────────
+
+async def get_user_packs(user_id: int) -> list[str]:
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            "SELECT pack_id FROM user_packs WHERE user_id = ?", (user_id,)
+        ) as cur:
+            return [r[0] for r in await cur.fetchall()]
+
+
+async def toggle_user_pack(user_id: int, pack_id: str) -> bool:
+    """Включает тему, если её не было, иначе выключает. True = тема включена."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute(
+            "DELETE FROM user_packs WHERE user_id = ? AND pack_id = ?", (user_id, pack_id)
+        )
+        if cur.rowcount:
+            await db.commit()
+            return False
+        await db.execute(
+            "INSERT INTO user_packs (user_id, pack_id) VALUES (?, ?)", (user_id, pack_id)
+        )
+        await db.commit()
+        return True
+
+
+async def get_all_monitored_packs() -> list[str]:
+    """Темы всех активных пользователей — из них берутся слова для поиска kwork."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            """
+            SELECT DISTINCT up.pack_id
+            FROM user_packs up
+            JOIN users u ON up.user_id = u.user_id
+            WHERE u.is_active = 1
+            """
+        ) as cur:
+            return [r[0] for r in await cur.fetchall()]
+
+
+async def get_all_monitored_keywords() -> list[str]:
+    """Свои ключевые слова активных пользователей (без минус-слов)."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            """
+            SELECT DISTINCT uk.keyword
+            FROM user_keywords uk
+            JOIN users u ON uk.user_id = u.user_id
+            WHERE u.is_active = 1 AND COALESCE(uk.is_negative, 0) = 0
+            """
+        ) as cur:
+            return [r[0] for r in await cur.fetchall()]
 
 
 # ── История заказов ────────────────────────────────────────────────────────

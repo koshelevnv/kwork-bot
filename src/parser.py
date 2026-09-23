@@ -7,7 +7,10 @@ import aiohttp
 import orjson
 from loguru import logger
 
-from src.constants import HEADERS, KWORK_API_URL, CATEGORY_NAME_BY_ID, ALL_CATEGORIES
+from src.constants import (
+    ALL_CATEGORIES, CATEGORY_NAME_BY_ID, HEADERS, KWORK_API_URL,
+    attr_full_name, attr_id_of,
+)
 
 _TIMEOUT = aiohttp.ClientTimeout(total=10)
 _KWORK_TZ_OFFSET = timedelta(hours=3)  # kwork отдаёт даты по Москве (UTC+3)
@@ -87,6 +90,10 @@ def _category_name(own_id: str, category_id: str) -> str:
     # В общей ленте раздел у каждого заказа свой — берём его из самого заказа.
     if category_id == ALL_CATEGORIES:
         return CATEGORY_NAME_BY_ID.get(own_id, "Все категории")
+    attr_id = attr_id_of(category_id)
+    if attr_id:
+        # Заказ пришёл из запроса по подрубрике — только так она и известна.
+        return attr_full_name(attr_id)
     return CATEGORY_NAME_BY_ID.get(category_id, f"Категория {category_id}")
 
 
@@ -109,15 +116,22 @@ def _build_order(raw: dict, category_id: str) -> dict:
 
 
 async def fetch_orders(session: aiohttp.ClientSession, category_id: str) -> list[dict]:
-    """Свежие заказы категории или всей ленты, если category_id == ALL_CATEGORIES."""
+    """Свежие заказы источника: категории, подрубрики (id с префиксом «a») или
+    всей ленты, если category_id == ALL_CATEGORIES."""
     pages = _ALL_FEED_PAGES if category_id == ALL_CATEGORIES else 1
+    attr_id = attr_id_of(category_id)
+    label = f"подрубрики {attr_id}" if attr_id else f"категории {category_id}"
 
     raw_orders: list[dict] = []
     for page in range(1, pages + 1):
         fields = {"page": str(page)}
-        if category_id != ALL_CATEGORIES:
+        if attr_id:
+            # attr самодостаточен: вместе с ним поле c не нужно, а несколько
+            # значений за раз kwork не принимает — побеждает последнее.
+            fields["attr"] = attr_id
+        elif category_id != ALL_CATEGORIES:
             fields["c"] = category_id
-        raw_orders.extend(await _fetch_page(session, fields, f"категории {category_id}"))
+        raw_orders.extend(await _fetch_page(session, fields, label))
 
     return [_build_order(o, category_id) for o in raw_orders if o.get("id")]
 

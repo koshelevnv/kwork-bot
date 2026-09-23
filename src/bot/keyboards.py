@@ -4,7 +4,10 @@ from aiogram.types import (
 )
 from aiogram.utils.keyboard import InlineKeyboardBuilder, ReplyKeyboardBuilder
 
-from src.constants import KWORK_CATEGORIES, TIMEZONES
+from src.constants import (
+    KWORK_ATTRIBUTES, KWORK_CATEGORIES, TIMEZONES,
+    attr_id_of, attr_source,
+)
 from src.topics import TOPIC_PACKS, pack_title
 
 DAYS = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
@@ -58,9 +61,12 @@ def my_categories_kb(
 ) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     for cat in categories:
+        attr_id = attr_id_of(cat["category_id"])
+        mark    = "🔹" if attr_id else "✅"
+        number  = attr_id or cat["category_id"]
         builder.row(
             InlineKeyboardButton(
-                text=f"✅ {cat['category_name']} #{cat['category_id']}",
+                text=f"{mark} {cat['category_name']} #{number}",
                 callback_data="noop",
             ),
             InlineKeyboardButton(text="❌", callback_data=f"del_cat:{cat['category_id']}"),
@@ -109,8 +115,40 @@ def category_list_kb(
         already = cat_id in user_cat_ids
         label = f"{mark} {name} #{cat_id}" if already else f"{name} #{cat_id}"
         cb    = f"{rm_cb}:{cat_id}" if already else f"{add_cb}:{cat_id}"
-        builder.row(InlineKeyboardButton(text=label, callback_data=cb))
+        row = [InlineKeyboardButton(text=label, callback_data=cb)]
+        # Подрубрики — только для отслеживания: исключать по ним нечего, заказ
+        # в ленте свою подрубрику не сообщает.
+        attrs = KWORK_ATTRIBUTES.get(cat_id)
+        if mode != "excl" and attrs:
+            chosen = sum(
+                1 for a_id, _ in attrs if attr_source(a_id) in user_cat_ids
+            )
+            row.append(InlineKeyboardButton(
+                text=f"{chosen}/{len(attrs)} ›" if chosen else f"{len(attrs)} ›",
+                callback_data=f"catattrs:{cat_id}",
+            ))
+        builder.row(*row)
     builder.row(InlineKeyboardButton(text="🔙 К группам", callback_data=back))
+    return builder.as_markup()
+
+
+def attributes_kb(cat_id: str, user_cat_ids: set[str]) -> InlineKeyboardMarkup:
+    """Подрубрики одной категории. Категория целиком и её подрубрики —
+    разные источники: первая даёт один запрос к ленте, каждая вторая — свой."""
+    builder = InlineKeyboardBuilder()
+    whole = cat_id in user_cat_ids
+    builder.row(InlineKeyboardButton(
+        text="✅ Вся категория" if whole else "Вся категория",
+        callback_data=f"{'attr_all_off' if whole else 'attr_all_on'}:{cat_id}",
+    ))
+    for attr_id, name in KWORK_ATTRIBUTES.get(cat_id, []):
+        source  = attr_source(attr_id)
+        already = source in user_cat_ids
+        builder.row(InlineKeyboardButton(
+            text=f"🔹 {name}" if already else name,
+            callback_data=f"{'rm_attr' if already else 'add_attr'}:{attr_id}",
+        ))
+    builder.row(InlineKeyboardButton(text="🔙 К категориям", callback_data=f"catback:{cat_id}"))
     return builder.as_markup()
 
 

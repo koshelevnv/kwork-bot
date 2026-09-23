@@ -74,6 +74,14 @@ async def init_db(poll_interval: int = 30) -> None:
                 PRIMARY KEY (category_id)
             );
 
+            CREATE TABLE IF NOT EXISTS kwork_attributes (
+                category_id   TEXT    NOT NULL,
+                attr_id       TEXT    NOT NULL,
+                attr_name     TEXT    NOT NULL,
+                sort_index    INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (attr_id)
+            );
+
             CREATE TABLE IF NOT EXISTS global_settings (
                 id                INTEGER PRIMARY KEY CHECK (id = 1),
                 fetch_interval    INTEGER NOT NULL DEFAULT 30,
@@ -553,6 +561,32 @@ async def save_categories(categories: dict[str, list[tuple[str, str]]]) -> None:
                     (parent_name, cat_id, cat_name, idx),
                 )
         await db.commit()
+
+
+async def save_attributes(attributes: dict[str, list[tuple[str, str]]]) -> None:
+    """Сохранить подрубрики в БД (полная замена)."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("DELETE FROM kwork_attributes")
+        for cat_id, attrs in attributes.items():
+            for idx, (attr_id, attr_name) in enumerate(attrs):
+                await db.execute(
+                    "INSERT INTO kwork_attributes (category_id, attr_id, attr_name, sort_index) VALUES (?, ?, ?, ?)",
+                    (cat_id, attr_id, attr_name, idx),
+                )
+        await db.commit()
+
+
+async def load_attributes() -> dict[str, list[tuple[str, str]]]:
+    """Загрузить подрубрики из БД. Возвращает пустой dict если таблица пуста."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            "SELECT category_id, attr_id, attr_name FROM kwork_attributes ORDER BY category_id, sort_index"
+        ) as cur:
+            rows = await cur.fetchall()
+    result: dict[str, list[tuple[str, str]]] = {}
+    for cat_id, attr_id, attr_name in rows:
+        result.setdefault(cat_id, []).append((attr_id, attr_name))
+    return result
 
 
 async def load_categories() -> dict[str, list[tuple[str, str]]]:

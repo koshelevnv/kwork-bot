@@ -6,13 +6,17 @@ from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup
 
 from src.bot.keyboards import (
     main_reply_kb, start_kb, my_categories_kb, category_groups_kb,
-    category_list_kb, keywords_kb, packs_kb, settings_kb,
+    category_list_kb, attributes_kb, keywords_kb, packs_kb, settings_kb,
     hour_grid_kb, timezone_kb, back_kb, cancel_kb, skip_cancel_kb,
     interval_kb, INTERVALS, filters_kb, global_interval_kb, days_kb, DAYS,
 )
 from src.config import Settings
 from src.topics import pack_title
-from src.constants import KWORK_CATEGORIES, TIMEZONES, CATEGORY_NAME_BY_ID
+from src.constants import (
+    ATTRIBUTE_PARENT_BY_ID, CATEGORY_NAME_BY_ID, KWORK_ATTRIBUTES,
+    KWORK_CATEGORIES, TIMEZONES,
+    attr_full_name, attr_id_of, attr_source, category_group,
+)
 from src.database import (
     upsert_user, get_user, get_user_categories, get_user_excluded_categories,
     add_user_category,
@@ -30,6 +34,18 @@ NO_CATEGORIES_HINT = (
     "🌐 <b>Категории не выбраны — присылаю заказы из всех разделов.</b>\n"
     "Чтобы сузить: «🎛 Фильтры» → «➕ Добавить категорию».\n"
     "Убрать пару лишних разделов: «🚫 Исключить категорию»."
+)
+
+# Каждая выбранная подрубрика — отдельный запрос к kwork в каждом цикле
+# мониторинга (одним запросом биржа фильтрует только по одной), поэтому
+# их число ограничено.
+MAX_ATTRS = 25
+
+ATTRS_HINT = (
+    "🔹 <b>{cat}</b>\n\n"
+    "Подрубрики — третий уровень kwork. Отметь нужные, и заказы будут "
+    "приходить только из них.\n"
+    "«Вся категория» — весь раздел целиком, без разбивки."
 )
 
 EXCLUDE_HINT = (
@@ -149,7 +165,10 @@ async def btn_status(message: Message, settings: Settings) -> None:
     packs = await get_user_packs(uid)
     minus = await get_user_minus_words(uid)
 
-    cat_lines  = "\n".join(f"  • {c['category_name']}" for c in cats) or "  все разделы (фильтр не задан)"
+    cat_lines  = "\n".join(
+        f"  {'🔹' if attr_id_of(c['category_id']) else '•'} {c['category_name']}"
+        for c in cats
+    ) or "  все разделы (фильтр не задан)"
     excl_block = (
         "\n\n<b>Исключены ({n}):</b>\n{lines}".format(
             n=len(excl),
@@ -227,8 +246,12 @@ async def cb_my_cats(call: CallbackQuery, settings: Settings) -> None:
 async def _show_my_cats(msg: Message, user_id: int, edit: bool = False) -> None:
     cats = await get_user_categories(user_id)
     excl = await get_user_excluded_categories(user_id)
+    attrs_count = sum(1 for c in cats if attr_id_of(c['category_id']))
     if cats:
-        text = f"📋 <b>Ваши категории</b> ({len(cats)})\n\nНажми ❌ чтобы удалить 👇"
+        header = f"📋 <b>Ваши категории</b> ({len(cats) - attrs_count})"
+        if attrs_count:
+            header += f" и подрубрики ({attrs_count})"
+        text = f"{header}\n\nНажми ❌ чтобы удалить 👇"
     else:
         text = (
             "📋 Категории не выбраны — приходят заказы из <b>всех разделов</b>.\n\n"
@@ -281,8 +304,7 @@ async def cb_catgroup(call: CallbackQuery, settings: Settings) -> None:
     if group not in KWORK_CATEGORIES:
         await call.answer("Группа не найдена")
         return
-    user_cats    = await get_user_categories(call.from_user.id)
-    user_cat_ids = {c["category_id"] for c in user_cats}
+    user_cat_ids = await _user_sources(call.from_user.id)
     await call.answer()
     await call.message.edit_text(
         f"<b>{group}</b>\nВыбери категории — повторный клик удаляет ✅",
@@ -298,12 +320,11 @@ async def cb_add_cat(call: CallbackQuery, settings: Settings) -> None:
     cat_name = CATEGORY_NAME_BY_ID.get(cat_id, cat_id)
     added = await add_user_category(call.from_user.id, cat_id, cat_name)
     await call.answer(f"✅ Добавлена: {cat_name}" if added else "Уже отслеживается")
-    group = next(
-        (g for g, cats in KWORK_CATEGORIES.items() if any(c[0] == cat_id for c in cats)), None
-    )
+    group = category_group(cat_id)
     if group:
-        user_cat_ids = {c["category_id"] for c in await get_user_categories(call.from_user.id)}
-        await call.message.edit_reply_markup(reply_markup=category_list_kb(group, user_cat_ids))
+        await call.message.edit_reply_markup(
+            reply_markup=category_list_kb(group, await _user_sources(call.from_user.id))
+        )
 
 
 @router.callback_query(F.data.startswith("rm_from_group:"))
@@ -312,12 +333,114 @@ async def cb_rm_from_group(call: CallbackQuery, settings: Settings) -> None:
     cat_id = call.data[len("rm_from_group:"):]
     removed = await remove_user_category(call.from_user.id, cat_id)
     await call.answer("❌ Удалена" if removed else "Не найдена")
-    group = next(
-        (g for g, cats in KWORK_CATEGORIES.items() if any(c[0] == cat_id for c in cats)), None
-    )
+    group = category_group(cat_id)
     if group:
-        user_cat_ids = {c["category_id"] for c in await get_user_categories(call.from_user.id)}
-        await call.message.edit_reply_markup(reply_markup=category_list_kb(group, user_cat_ids))
+        await call.message.edit_reply_markup(
+            reply_markup=category_list_kb(group, await _user_sources(call.from_user.id))
+        )
+
+
+# ── Подрубрики (третий уровень) ────────────────────────────────────────────
+
+async def _user_sources(user_id: int) -> set[str]:
+    """Всё, что пользователь отслеживает: и категории, и подрубрики."""
+    return {c["category_id"] for c in await get_user_categories(user_id)}
+
+
+async def _show_attrs(call: CallbackQuery, cat_id: str, edit_text: bool = True) -> None:
+    kb = attributes_kb(cat_id, await _user_sources(call.from_user.id))
+    if edit_text:
+        cat_name = CATEGORY_NAME_BY_ID.get(cat_id, f"Категория {cat_id}")
+        await call.message.edit_text(
+            ATTRS_HINT.format(cat=cat_name), parse_mode="HTML", reply_markup=kb
+        )
+    else:
+        await call.message.edit_reply_markup(reply_markup=kb)
+
+
+@router.callback_query(F.data.startswith("catattrs:"))
+async def cb_cat_attrs(call: CallbackQuery, settings: Settings) -> None:
+    await _reg(call, settings)
+    cat_id = call.data[len("catattrs:"):]
+    if not KWORK_ATTRIBUTES.get(cat_id):
+        await call.answer("У категории нет подрубрик")
+        return
+    await call.answer()
+    await _show_attrs(call, cat_id)
+
+
+@router.callback_query(F.data.startswith("catback:"))
+async def cb_cat_back(call: CallbackQuery, settings: Settings) -> None:
+    """Возврат из подрубрик к списку категорий их раздела."""
+    await _reg(call, settings)
+    cat_id = call.data[len("catback:"):]
+    group  = category_group(cat_id)
+    await call.answer()
+    if not group:
+        await call.message.edit_text(
+            "Выбери группу категорий 👇", reply_markup=category_groups_kb()
+        )
+        return
+    await call.message.edit_text(
+        f"<b>{group}</b>\nВыбери категории — повторный клик удаляет ✅",
+        parse_mode="HTML",
+        reply_markup=category_list_kb(group, await _user_sources(call.from_user.id)),
+    )
+
+
+@router.callback_query(F.data.startswith("add_attr:"))
+async def cb_add_attr(call: CallbackQuery, settings: Settings) -> None:
+    await _reg(call, settings)
+    attr_id = call.data[len("add_attr:"):]
+    cat_id  = ATTRIBUTE_PARENT_BY_ID.get(attr_id)
+    if not cat_id:
+        await call.answer("Подрубрика не найдена")
+        return
+
+    sources = await _user_sources(call.from_user.id)
+    if sum(1 for src in sources if attr_id_of(src)) >= MAX_ATTRS:
+        await call.answer(
+            f"Больше {MAX_ATTRS} подрубрик не получится — каждая опрашивается "
+            f"отдельным запросом. Выбери категорию целиком.",
+            show_alert=True,
+        )
+        return
+
+    name  = attr_full_name(attr_id)
+    added = await add_user_category(call.from_user.id, attr_source(attr_id), name)
+    await call.answer(f"🔹 Добавлена: {name}" if added else "Уже отслеживается")
+    await _show_attrs(call, cat_id, edit_text=False)
+
+
+@router.callback_query(F.data.startswith("rm_attr:"))
+async def cb_rm_attr(call: CallbackQuery, settings: Settings) -> None:
+    await _reg(call, settings)
+    attr_id = call.data[len("rm_attr:"):]
+    cat_id  = ATTRIBUTE_PARENT_BY_ID.get(attr_id)
+    removed = await remove_user_category(call.from_user.id, attr_source(attr_id))
+    await call.answer("❌ Удалена" if removed else "Не найдена")
+    if cat_id:
+        await _show_attrs(call, cat_id, edit_text=False)
+
+
+@router.callback_query(F.data.startswith("attr_all_on:"))
+async def cb_attr_all_on(call: CallbackQuery, settings: Settings) -> None:
+    """«Вся категория» с экрана подрубрик — один источник вместо нескольких."""
+    await _reg(call, settings)
+    cat_id   = call.data[len("attr_all_on:"):]
+    cat_name = CATEGORY_NAME_BY_ID.get(cat_id, cat_id)
+    added    = await add_user_category(call.from_user.id, cat_id, cat_name)
+    await call.answer(f"✅ Добавлена: {cat_name}" if added else "Уже отслеживается")
+    await _show_attrs(call, cat_id, edit_text=False)
+
+
+@router.callback_query(F.data.startswith("attr_all_off:"))
+async def cb_attr_all_off(call: CallbackQuery, settings: Settings) -> None:
+    await _reg(call, settings)
+    cat_id  = call.data[len("attr_all_off:"):]
+    removed = await remove_user_category(call.from_user.id, cat_id)
+    await call.answer("❌ Удалена" if removed else "Не найдена")
+    await _show_attrs(call, cat_id, edit_text=False)
 
 
 @router.callback_query(F.data == "cat_manual")
@@ -389,9 +512,7 @@ async def cb_excl_group(call: CallbackQuery, settings: Settings) -> None:
 
 
 async def _refresh_excl_group(call: CallbackQuery, cat_id: str) -> None:
-    group = next(
-        (g for g, cats in KWORK_CATEGORIES.items() if any(c[0] == cat_id for c in cats)), None
-    )
+    group = category_group(cat_id)
     if not group:
         return
     excl_ids = {c["category_id"] for c in await get_user_excluded_categories(call.from_user.id)}

@@ -13,7 +13,7 @@ from src.database import (
     get_user_keywords, get_user_minus_words, get_user_packs,
     store_order, update_last_notified, get_global_settings,
 )
-from src.constants import ALL_CATEGORIES
+from src.constants import ALL_CATEGORIES, attr_id_of
 from src.matching import order_matches
 from src.notifier import send_order
 from src.parser import fetch_orders, fetch_orders_by_keyword
@@ -57,7 +57,7 @@ async def _deliver(bot: Bot, user: dict) -> None:
             return
 
         since    = user["last_notified_at"]
-        orders   = await get_orders_since(cat_ids, since)
+        orders   = _dedup(await get_orders_since(cat_ids, since))
         keywords = await get_user_keywords(uid) + pack_keywords(await get_user_packs(uid))
         minus    = await get_user_minus_words(uid)
 
@@ -104,6 +104,20 @@ async def _deliver(bot: Bot, user: dict) -> None:
         logger.exception(f"Ошибка доставки для пользователя {uid}")
     finally:
         await update_last_notified(uid)
+
+
+def _dedup(orders: list[dict]) -> list[dict]:
+    """Один заказ — одно сообщение. В истории он лежит отдельной записью под
+    каждым источником, а категория и её подрубрика запросто выбраны обе.
+    Из совпадений оставляем запись подрубрики: её подпись точнее."""
+    best: dict[int, dict] = {}
+    for order in orders:
+        seen = best.get(order["order_id"])
+        if seen is None or (
+            attr_id_of(order["category_id"]) and not attr_id_of(seen["category_id"])
+        ):
+            best[order["order_id"]] = order
+    return sorted(best.values(), key=lambda o: o["published_at"])
 
 
 async def _search_terms() -> list[str]:

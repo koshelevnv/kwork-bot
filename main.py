@@ -7,8 +7,10 @@ from loguru import logger
 
 from src.bot.handlers import router
 from src.config import Settings
-from src.constants import update_categories
-from src.database import init_db, load_categories, reset_all_last_notified
+from src.constants import update_attributes, update_categories
+from src.database import (
+    init_db, load_attributes, load_categories, reset_all_last_notified,
+)
 from src.monitor import monitoring_loop
 
 
@@ -33,6 +35,14 @@ async def main() -> None:
         logger.info(f"Категории загружены из БД: {len(cats_from_db)} разделов")
     else:
         logger.info("Категории загружены из constants.py (БД пуста)")
+
+    attrs_from_db = await load_attributes()
+    if attrs_from_db:
+        update_attributes(attrs_from_db)
+        total_attrs = sum(len(v) for v in attrs_from_db.values())
+        logger.info(f"Подрубрики загружены из БД: {total_attrs}")
+    else:
+        logger.info("Подрубрики загружены из constants.py (БД пуста)")
 
     bot = Bot(token=settings.tg_token)
     dp  = Dispatcher(storage=MemoryStorage())
